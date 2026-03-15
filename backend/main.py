@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import date, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -10,11 +13,31 @@ from urllib.request import urlopen
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import BigInteger, Column, MetaData, String, Table, Text, create_engine, delete, func, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+try:
+    import redis as redis_lib
+except ImportError:  # pragma: no cover - optional dependency in local dev until installed
+    redis_lib = None
 
 BASE_DIR = Path(__file__).resolve().parent
-MOCK_DATA_FILE = BASE_DIR.parent / "dataset" / "events.json"
 REAL_DATA_FILE = BASE_DIR.parent / "dataset" / "real_events.json"
 CNEOS_API_URL = "https://ssd-api.jpl.nasa.gov/fireball.api"
+DEFAULT_DATABASE_URL = f"sqlite:///{(BASE_DIR.parent / 'dataset' / 'meteor.db').as_posix()}"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL).strip()
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+
+def _safe_int_env(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+
+CACHE_TTL_SECONDS = _safe_int_env("CACHE_TTL_SECONDS", 120)
 
 SCIENTIFIC_SOURCES: list[dict[str, Any]] = [
     {
@@ -114,15 +137,165 @@ STACK_PROFILE: dict[str, Any] = {
     },
 }
 
+METADATA = MetaData()
+METEOR_EVENTS_TABLE = Table(
+    "meteor_events",
+    METADATA,
+    Column("id", BigInteger, primary_key=True),
+    Column("source", String(32), nullable=False, index=True),
+    Column("observed_at", String(64), nullable=True),
+    Column("payload", Text, nullable=False),
+)
+
+db_engine: Engine | None = None
+redis_client: Any | None = None
+local_cache: dict[str, tuple[float, str]] = {}
+local_cache_lock = Lock()
+cache_version = 1
+
 
 class DataSourceError(RuntimeError):
     """Raised when a dataset cannot be loaded or fetched."""
 
 
-def resolve_source(source: Literal["auto", "mock", "real"]) -> Literal["mock", "real"]:
-    if source == "mock":
-        return "mock"
-    if source == "real":
+def init_database() -> None:
+    """Initialize SQL database connection and ensure schema exists."""
+    global db_engine
+    try:
+        db_engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True)
+        METADATA.create_all(db_engine)
+    except SQLAlchemyError:
+        db_engine = None
+
+
+def init_cache() -> None:
+    """Initialize Redis client if URL is provided, else use in-process cache."""
+    global redis_client
+    if not REDIS_URL or redis_lib is None:
+        redis_client = None
+        return
+    try:
+        redis_client = redis_lib.Redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+    except Exception:
+        redis_client = None
+
+
+def _cache_key(*parts: Any) -> str:
+    joined = "|".join(str(part) for part in parts)
+    return f"meteor:{cache_version}:{joined}"
+
+
+def _cache_get(key: str) -> Any | None:
+    if redis_client is not None:
+        raw = redis_client.get(key)
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    now = time.time()
+    with local_cache_lock:
+        cached = local_cache.get(key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at < now:
+            local_cache.pop(key, None)
+            return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+
+def _cache_set(key: str, payload: Any) -> None:
+    encoded = json.dumps(payload)
+    if redis_client is not None:
+        redis_client.setex(key, CACHE_TTL_SECONDS, encoded)
+        return
+
+    expires_at = time.time() + CACHE_TTL_SECONDS
+    with local_cache_lock:
+        local_cache[key] = (expires_at, encoded)
+
+
+def _bump_cache_version() -> None:
+    global cache_version
+    cache_version += 1
+
+
+def _save_events_to_db(events: list[dict[str, Any]], source: str) -> bool:
+    if db_engine is None:
+        return False
+
+    rows = [
+        {
+            "id": int(event["id"]),
+            "source": source,
+            "observed_at": str(event.get("observed_at") or ""),
+            "payload": json.dumps(event),
+        }
+        for event in events
+    ]
+
+    try:
+        with db_engine.begin() as conn:
+            conn.execute(delete(METEOR_EVENTS_TABLE).where(METEOR_EVENTS_TABLE.c.source == source))
+            if rows:
+                conn.execute(insert(METEOR_EVENTS_TABLE), rows)
+    except SQLAlchemyError:
+        return False
+
+    return True
+
+
+def _load_events_from_db(source: str) -> list[dict[str, Any]]:
+    if db_engine is None:
+        return []
+
+    try:
+        with db_engine.connect() as conn:
+            result = conn.execute(
+                select(METEOR_EVENTS_TABLE.c.payload).where(METEOR_EVENTS_TABLE.c.source == source)
+            )
+            rows = [row[0] for row in result.fetchall()]
+    except SQLAlchemyError:
+        return []
+
+    events: list[dict[str, Any]] = []
+    for payload in rows:
+        try:
+            parsed = json.loads(str(payload))
+            if isinstance(parsed, dict):
+                events.append(parsed)
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def _count_events_in_db(source: str) -> int:
+    if db_engine is None:
+        return 0
+
+    try:
+        with db_engine.connect() as conn:
+            result = conn.execute(
+                select(func.count()).select_from(METEOR_EVENTS_TABLE).where(METEOR_EVENTS_TABLE.c.source == source)
+            )
+            value = result.scalar_one_or_none()
+            return int(value or 0)
+    except SQLAlchemyError:
+        return 0
+
+
+def resolve_source(source: Literal["real"]) -> Literal["real"]:
+    if source != "real":
+        raise DataSourceError("Only real source is supported.")
+
+    if _count_events_in_db("real") > 0:
         return "real"
 
     if REAL_DATA_FILE.exists():
@@ -132,7 +305,8 @@ def resolve_source(source: Literal["auto", "mock", "real"]) -> Literal["mock", "
                 return "real"
         except DataSourceError:
             pass
-    return "mock"
+
+    raise DataSourceError("No real dataset available yet. Run POST /sync-real-events first.")
 
 
 def _load_json(path: Path) -> list[dict[str, Any]]:
@@ -301,18 +475,26 @@ def fetch_cneos_events(limit: int) -> list[dict[str, Any]]:
     return events
 
 
-def load_events(source: Literal["auto", "mock", "real"] = "auto") -> list[dict[str, Any]]:
-    resolved = resolve_source(source)
-    if resolved == "mock":
-        return _load_json(MOCK_DATA_FILE)
+def load_events(source: Literal["real"] = "real") -> list[dict[str, Any]]:
+    resolve_source(source)
+    db_events = _load_events_from_db("real")
+    if db_events:
+        return db_events
+
     return _load_json(REAL_DATA_FILE)
 
 
 def get_event_by_id(
-    event_id: int, source: Literal["auto", "mock", "real"] = "auto"
+    event_id: int, source: Literal["real"] = "real"
 ) -> dict[str, Any]:
+    cache_key = _cache_key("event", source, event_id)
+    cached_event = _cache_get(cache_key)
+    if isinstance(cached_event, dict):
+        return cached_event
+
     for event in load_events(source):
         if event["id"] == event_id:
+            _cache_set(cache_key, event)
             return event
     raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
@@ -355,7 +537,7 @@ def apply_filters(
     return filtered
 
 
-def dataset_summary(source: Literal["auto", "mock", "real"]) -> dict[str, Any]:
+def dataset_summary(source: Literal["real"]) -> dict[str, Any]:
     resolved_source = resolve_source(source)
     events = load_events(source)
     min_date, max_date = _event_date_bounds(events)
@@ -377,6 +559,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def startup_bootstrap() -> None:
+    init_database()
+    init_cache()
 
 
 @app.get("/")
@@ -405,6 +593,42 @@ def get_stack() -> dict[str, Any]:
     return STACK_PROFILE
 
 
+@app.get("/project-status")
+def get_project_status() -> dict[str, Any]:
+    live_integrations = sum(
+        1 for source in SCIENTIFIC_SOURCES if source["integration_status"] == "live"
+    )
+    total_integrations = len(SCIENTIFIC_SOURCES)
+    planned_integrations = total_integrations - live_integrations
+
+    return {
+        "phase": "MVP+",
+        "completion_ratio": round(live_integrations / total_integrations, 3),
+        "dataset_integrations": {
+            "total": total_integrations,
+            "live": live_integrations,
+            "planned": planned_integrations,
+        },
+        "storage": {
+            "database_enabled": db_engine is not None,
+            "database_url": DATABASE_URL if db_engine is not None else None,
+            "real_events_in_database": _count_events_in_db("real"),
+            "json_snapshot_file": str(REAL_DATA_FILE),
+        },
+        "cache": {
+            "cache_enabled": True,
+            "backend": "redis" if redis_client is not None else "in_memory",
+            "redis_enabled": redis_client is not None,
+            "ttl_seconds": CACHE_TTL_SECONDS,
+        },
+        "next_milestones": [
+            "Integrate additional live sources (GMN/AMS/IAU/EDMOND/SonotaCo)",
+            "Add orbit reconstruction pipeline using Astropy + Skyfield",
+            "Deploy Postgres + Redis in cloud and automate scheduled sync jobs",
+        ],
+    }
+
+
 @app.get("/data-status")
 def data_status() -> dict[str, Any]:
     real_exists = REAL_DATA_FILE.exists()
@@ -414,17 +638,31 @@ def data_status() -> dict[str, Any]:
             real_count = len(_load_json(REAL_DATA_FILE))
         except DataSourceError:
             real_count = 0
+
+    db_real_count = _count_events_in_db("real")
+    real_dataset_range: dict[str, Any] | None = None
+    try:
+        real_dataset_range = dataset_summary("real")
+    except DataSourceError:
+        real_dataset_range = None
+
     return {
-        "real_data_available": real_exists and real_count > 0,
+        "real_data_available": (real_exists and real_count > 0) or db_real_count > 0,
         "real_event_count": real_count,
-        "mock_event_count": len(_load_json(MOCK_DATA_FILE)),
-        "auto_dataset_range": dataset_summary("auto"),
+        "real_event_count_db": db_real_count,
+        "database_enabled": db_engine is not None,
+        "database_url": DATABASE_URL if db_engine is not None else None,
+        "cache_enabled": True,
+        "cache_backend": "redis" if redis_client is not None else "in_memory",
+        "redis_enabled": redis_client is not None,
+        "cache_ttl_seconds": CACHE_TTL_SECONDS,
+        "real_dataset_range": real_dataset_range,
     }
 
 
 @app.get("/dataset-range")
 def get_dataset_range(
-    source: Literal["auto", "mock", "real"] = Query(default="auto"),
+    source: Literal["real"] = Query(default="real"),
 ) -> dict[str, Any]:
     try:
         return dataset_summary(source)
@@ -434,40 +672,59 @@ def get_dataset_range(
 
 @app.post("/sync-real-events")
 def sync_real_events(
-    limit: int = Query(default=1500, ge=100, le=20000),
+    limit: int = Query(default=20000, ge=100, le=50000),
 ) -> dict[str, Any]:
     try:
         events = fetch_cneos_events(limit)
         _save_json(REAL_DATA_FILE, events)
+        persisted_to_db = _save_events_to_db(events, "real")
+        _bump_cache_version()
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {
-        "message": "Real NASA CNEOS dataset synced",
+        "message": "Real NASA CNEOS dataset synced (live-only mode)",
         "saved_events": len(events),
         "dataset_file": str(REAL_DATA_FILE),
+        "persisted_to_database": persisted_to_db,
+        "database_url": DATABASE_URL if persisted_to_db else None,
     }
 
 
 @app.get("/events")
 def get_events(
-    source: Literal["auto", "mock", "real"] = Query(default="auto"),
+    source: Literal["real"] = Query(default="real"),
     q: str | None = Query(default=None, description="Search by event name"),
     date_from: str | None = Query(default=None, description="Filter from YYYY-MM-DD"),
     date_to: str | None = Query(default=None, description="Filter to YYYY-MM-DD"),
     station: str | None = Query(default=None, description="Filter by station name"),
 ) -> list[dict[str, Any]]:
+    cache_key = _cache_key(
+        "events",
+        source,
+        q or "",
+        date_from or "",
+        date_to or "",
+        station or "",
+    )
+    cached_events = _cache_get(cache_key)
+    if isinstance(cached_events, list):
+        return cached_events
+
     try:
         events = load_events(source)
     except DataSourceError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return apply_filters(events, q, date_from, date_to, station)
+
+    filtered_events = apply_filters(events, q, date_from, date_to, station)
+    _cache_set(cache_key, filtered_events)
+    return filtered_events
 
 
 @app.get("/events/{event_id}")
 def get_event(
     event_id: int,
-    source: Literal["auto", "mock", "real"] = Query(default="auto"),
+    source: Literal["real"] = Query(default="real"),
 ) -> dict[str, Any]:
     return get_event_by_id(event_id, source)
 
@@ -475,7 +732,7 @@ def get_event(
 @app.get("/trajectory/{event_id}")
 def get_trajectory(
     event_id: int,
-    source: Literal["auto", "mock", "real"] = Query(default="auto"),
+    source: Literal["real"] = Query(default="real"),
 ) -> dict[str, Any]:
     event = get_event_by_id(event_id, source)
     return {
@@ -489,7 +746,7 @@ def get_trajectory(
 def compare_events(
     left: int = Query(..., description="Left event id"),
     right: int = Query(..., description="Right event id"),
-    source: Literal["auto", "mock", "real"] = Query(default="auto"),
+    source: Literal["real"] = Query(default="real"),
 ) -> dict[str, Any]:
     left_event = get_event_by_id(left, source)
     right_event = get_event_by_id(right, source)

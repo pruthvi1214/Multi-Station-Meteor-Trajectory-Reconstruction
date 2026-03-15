@@ -54,15 +54,22 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+Optional environment variables:
+
+- `DATABASE_URL` (defaults to local SQLite at `dataset/meteor.db`; use PostgreSQL URL in cloud)
+- `REDIS_URL` (optional Redis cache backend)
+- `CACHE_TTL_SECONDS` (default `120`)
+
 API endpoints:
 
 - `GET /`
 - `GET /health`
 - `GET /sources`
 - `GET /stack`
+- `GET /project-status`
 - `GET /data-status`
-- `GET /dataset-range?source=auto`
-- `POST /sync-real-events?limit=2000`
+- `GET /dataset-range?source=real`
+- `POST /sync-real-events?limit=20000`
 - `GET /events?source=real&q=fireball&date_from=2024-01-01&date_to=2026-12-31&station=nasa`
 - `GET /events/{event_id}`
 - `GET /trajectory/{event_id}`
@@ -74,13 +81,12 @@ To load real data the first time:
 2. Open `http://127.0.0.1:8000/docs`
 3. Run `POST /sync-real-events`
 
-After sync, the frontend can use `Real NASA Data` mode.
-
-Note: frontend also includes a bundled `public/real_events.json` snapshot so data still appears if API sync is blocked.
+After sync, the frontend runs in `Real NASA Data (Live Only)` mode.
+No mock/dummy fallback is used for event rendering.
 
 UI behavior:
 
-- Auto-detects date range from active dataset source
+- Auto-detects date range from real dataset source
 - Defaults `Date To` to latest available dataset date
 - Warns when selected dates are outside available range
 

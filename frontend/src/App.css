@@ -236,6 +236,17 @@ select:focus {
   color: #d8e8fb;
 }
 
+.project-note {
+  margin-bottom: 0.62rem;
+  padding: 0.52rem 0.56rem;
+  border-radius: 10px;
+  border: 1px solid #47688d;
+  background: rgba(24, 40, 61, 0.72);
+  color: #d9e9fb;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .clear-btn {
   margin-bottom: 0.82rem;
   border: 1px solid #547398;

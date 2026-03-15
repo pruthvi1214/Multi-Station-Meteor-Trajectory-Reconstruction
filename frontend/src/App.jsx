@@ -4,6 +4,8 @@ import Globe from "react-globe.gl";
 import Plot from "react-plotly.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_TIMEOUT_MS = 12000;
+const apiClient = axios.create({ baseURL: API_BASE, timeout: API_TIMEOUT_MS });
 const INITIAL_FILTERS = { q: "", dateFrom: "", dateTo: "", station: "" };
 const FALLBACK_SOURCES = [
   {
@@ -77,6 +79,13 @@ const FALLBACK_STACK = {
   },
 };
 
+const FALLBACK_PROJECT_STATUS = {
+  phase: "MVP+",
+  dataset_integrations: { total: 8, live: 1, planned: 7 },
+  storage: { database_enabled: false, real_events_in_database: 0 },
+  cache: { cache_enabled: true, backend: "in_memory", ttl_seconds: 120 },
+};
+
 const normalizeEvents = (rawEvents) => {
   if (!Array.isArray(rawEvents)) return [];
   return rawEvents.filter(
@@ -99,39 +108,12 @@ const safeDateTimeLabel = (value) => {
   return Number.isNaN(dt.getTime()) ? "Unknown" : dt.toLocaleString();
 };
 
-const deriveRangeFromEvents = (events, sourceRequested = "auto", sourceResolved = "auto") => {
-  const dates = events
-    .map((event) => safeDateLabel(event.observed_at))
-    .filter((d) => d !== "Unknown date");
-
-  if (dates.length === 0) {
-    return {
-      source_requested: sourceRequested,
-      source_resolved: sourceResolved,
-      event_count: events.length,
-      min_date: null,
-      max_date: null,
-      latest_available_date: null,
-    };
-  }
-
-  const sorted = [...dates].sort();
-  return {
-    source_requested: sourceRequested,
-    source_resolved: sourceResolved,
-    event_count: events.length,
-    min_date: sorted[0],
-    max_date: sorted[sorted.length - 1],
-    latest_available_date: sorted[sorted.length - 1],
-  };
-};
-
 function App() {
   const [events, setEvents] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [compareId, setCompareId] = useState(null);
   const [filters, setFilters] = useState(INITIAL_FILTERS);
-  const [sourceMode, setSourceMode] = useState("auto");
+  const [sourceMode] = useState("real");
   const [datasetRange, setDatasetRange] = useState(null);
   const [rangeWarning, setRangeWarning] = useState("");
   const [compareSummary, setCompareSummary] = useState(null);
@@ -141,23 +123,17 @@ function App() {
   const [syncMessage, setSyncMessage] = useState("");
   const [sources, setSources] = useState(FALLBACK_SOURCES);
   const [stackProfile, setStackProfile] = useState(FALLBACK_STACK);
+  const [projectStatus, setProjectStatus] = useState(FALLBACK_PROJECT_STATUS);
   const [error, setError] = useState("");
   const [globeSize, setGlobeSize] = useState({ width: 760, height: 420 });
-
-  const loadBundledRealData = async () => {
-    const response = await fetch("/real_events.json");
-    if (!response.ok) {
-      throw new Error("Bundled real dataset not found.");
-    }
-    return normalizeEvents(await response.json());
-  };
 
   useEffect(() => {
     const fetchProjectMetadata = async () => {
       try {
-        const [sourceResponse, stackResponse] = await Promise.all([
-          axios.get(`${API_BASE}/sources`),
-          axios.get(`${API_BASE}/stack`),
+        const [sourceResponse, stackResponse, statusResponse] = await Promise.all([
+          apiClient.get("/sources"),
+          apiClient.get("/stack"),
+          apiClient.get("/project-status"),
         ]);
 
         const remoteSources = sourceResponse?.data?.sources;
@@ -169,9 +145,15 @@ function App() {
         if (remoteStack && typeof remoteStack === "object") {
           setStackProfile(remoteStack);
         }
+
+        const remoteStatus = statusResponse?.data;
+        if (remoteStatus && typeof remoteStatus === "object") {
+          setProjectStatus(remoteStatus);
+        }
       } catch (metadataError) {
         setSources(FALLBACK_SOURCES);
         setStackProfile(FALLBACK_STACK);
+        setProjectStatus(FALLBACK_PROJECT_STATUS);
       }
     };
 
@@ -200,7 +182,7 @@ function App() {
   useEffect(() => {
     const fetchDatasetRange = async () => {
       try {
-        const response = await axios.get(`${API_BASE}/dataset-range`, {
+        const response = await apiClient.get("/dataset-range", {
           params: { source: sourceMode },
         });
         const range = response.data;
@@ -229,7 +211,7 @@ function App() {
       try {
         setError("");
         setLoading(true);
-        const response = await axios.get(`${API_BASE}/events`, {
+        const response = await apiClient.get("/events", {
           params: {
             source: sourceMode,
             q: filters.q || undefined,
@@ -258,30 +240,14 @@ function App() {
         setSelectedId(nextSelectedId);
         setCompareId(nextCompareId);
       } catch (fetchError) {
-        try {
-          const bundledEvents = await loadBundledRealData();
-          setEvents(bundledEvents);
-          setDatasetRange(deriveRangeFromEvents(bundledEvents, sourceMode, "bundled_real"));
-          setSelectedId(bundledEvents[0]?.id ?? null);
-          setCompareId(
-            bundledEvents.find((event) => event.id !== bundledEvents[0]?.id)?.id ??
-              bundledEvents[0]?.id ??
-              null,
-          );
-          const detail = fetchError?.response?.data?.detail;
-          setError(
-            detail
-              ? `${detail} Using bundled real snapshot.`
-              : "Backend unavailable. Using bundled real NASA snapshot.",
-          );
-        } catch (bundleError) {
-          setEvents([]);
-          const detail = fetchError?.response?.data?.detail;
-          setError(
-            detail ||
-              "No data available from backend or bundled snapshot. Check setup and retry.",
-          );
-        }
+        setEvents([]);
+        setSelectedId(null);
+        setCompareId(null);
+        const detail = fetchError?.response?.data?.detail;
+        setError(
+          detail ||
+            "No real dataset available. Start backend and run Sync Real NASA Data to load live events.",
+        );
       } finally {
         setLoading(false);
       }
@@ -328,7 +294,7 @@ function App() {
 
       try {
         setCompareLoading(true);
-        const response = await axios.get(`${API_BASE}/compare`, {
+        const response = await apiClient.get("/compare", {
           params: {
             left: selectedId,
             right: compareId,
@@ -437,15 +403,13 @@ function App() {
     try {
       setSyncLoading(true);
       setSyncMessage("");
-      const response = await axios.post(`${API_BASE}/sync-real-events`, null, {
-        params: { limit: 2000 },
+      const response = await apiClient.post("/sync-real-events", null, {
+        params: { limit: 20000 },
       });
       setSyncMessage(`Synced ${response.data.saved_events} real events from NASA CNEOS.`);
-      setSourceMode("real");
     } catch (syncError) {
       const detail = syncError?.response?.data?.detail;
-      setSyncMessage(detail || "Real-data sync failed. Using bundled snapshot.");
-      setSourceMode("auto");
+      setSyncMessage(detail || "Real-data sync failed. Retry when backend/API is reachable.");
     } finally {
       setSyncLoading(false);
     }
@@ -455,7 +419,7 @@ function App() {
     <main className="app-shell">
       <header className="app-header">
         <h1>Meteor Trajectory Command Deck</h1>
-        <p>Auto date-range detection + latest available date default enabled</p>
+        <p>Live-only mode: real NASA fireball events with no mock or dummy fallback</p>
       </header>
 
       {loading && <div className="state-banner loading">Loading meteor events...</div>}
@@ -470,14 +434,8 @@ function App() {
             <label className="field-label" htmlFor="source-mode">
               Data Source
             </label>
-            <select
-              id="source-mode"
-              value={sourceMode}
-              onChange={(e) => setSourceMode(e.target.value)}
-            >
-              <option value="auto">Auto (Real if available)</option>
-              <option value="real">Real NASA Data</option>
-              <option value="mock">Mock Fallback</option>
+            <select id="source-mode" value={sourceMode} disabled>
+              <option value="real">Real NASA Data (Live Only)</option>
             </select>
 
             <button className="sync-btn" onClick={syncRealData} disabled={syncLoading}>
@@ -492,6 +450,21 @@ function App() {
                 Latest available: {datasetRange.latest_available_date}
               </div>
             )}
+
+            <div className="project-note">
+              <b>Build Status:</b> {projectStatus.phase || "MVP+"}
+              <br />
+              Sources live: {projectStatus.dataset_integrations?.live ?? 0}/
+              {projectStatus.dataset_integrations?.total ?? 0}
+              <br />
+              Storage:{" "}
+              {projectStatus.storage?.database_enabled
+                ? `${projectStatus.storage?.real_events_in_database ?? 0} DB events`
+                : "JSON snapshot only"}
+              <br />
+              Cache: {projectStatus.cache?.backend || "in_memory"} (
+              {projectStatus.cache?.ttl_seconds ?? 120}s)
+            </div>
 
             <input
               className="search-box"
