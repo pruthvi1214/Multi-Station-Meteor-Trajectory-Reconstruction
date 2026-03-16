@@ -1,4 +1,5 @@
 @import url("https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
 
 :root {
   --bg-900: #060c14;
@@ -48,10 +49,58 @@ body::before {
   mask-image: radial-gradient(circle at center, black 20%, transparent 100%);
 }
 
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.08), transparent 18%),
+    radial-gradient(circle at 70% 80%, rgba(79, 176, 255, 0.07), transparent 19%),
+    radial-gradient(circle at 15% 70%, rgba(245, 220, 154, 0.06), transparent 17%);
+  opacity: 0.78;
+  z-index: -1;
+}
+
+@keyframes starfield {
+  from {
+    transform: translateY(0) scale(1);
+    opacity: 0.56;
+  }
+  to {
+    transform: translateY(-900px) scale(1.05);
+    opacity: 0.18;
+  }
+}
+
+body .body-stars {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.25) 1px, transparent 1px),
+    radial-gradient(rgba(180, 214, 255, 0.18) 1px, transparent 1px),
+    radial-gradient(rgba(255, 190, 120, 0.16) 1px, transparent 1px);
+  background-size: 100px 100px, 145px 145px, 212px 212px;
+  animation: starfield 35s linear infinite;
+  opacity: 0.7;
+  z-index: 0;
+}
+
 .app-shell {
   max-width: 1500px;
   margin: 0 auto;
   padding: 1.35rem 1.2rem 2rem;
+  position: relative;
+  perspective: 1300px;
+  transform-style: preserve-3d;
+  transition: transform 0.22s ease-out;
+  transform: translateZ(0);
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+}
+
+.app-shell:hover {
+  transform: translateZ(0);
 }
 
 .app-header {
@@ -142,6 +191,29 @@ body::before {
   box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(130, 170, 210, 0.08);
   backdrop-filter: blur(4px);
   padding: 1rem;
+  transform-style: preserve-3d;
+  transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.24s ease;
+  transform: rotateX(calc(var(--tilt-x) / 6)) rotateY(calc(var(--tilt-y) / 6));
+}
+
+.card:hover {
+  transform: perspective(1300px) rotateX(calc(var(--tilt-x) / 5)) rotateY(calc(var(--tilt-y) / 5)) scale(1.015);
+  box-shadow: 0 20px 35px rgba(16, 24, 43, 0.38), 0 0 20px rgba(80, 213, 255, 0.25);
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  pointer-events: none;
+  box-shadow: 0 0 65px rgba(80, 213, 255, 0.28);
+  opacity: 0;
+  transition: opacity 0.28s ease;
+}
+
+.card:hover::before {
+  opacity: 1;
 }
 
 .card h2 {
@@ -338,8 +410,30 @@ select:focus {
   border-radius: 14px;
   border: 1px solid #2a476a;
   background:
-    radial-gradient(circle at 50% 35%, rgba(32, 54, 82, 0.55), rgba(10, 19, 33, 0.95)),
-    #091321;
+    radial-gradient(circle at 50% 35%, rgba(32, 54, 82, 0.60), rgba(8, 17, 30, 0.96)),
+    linear-gradient(180deg, rgba(13, 26, 40, 0.95), rgba(8, 16, 28, 0.90));
+  box-shadow: inset 0 0 35px rgba(40, 119, 255, 0.18), 0 18px 40px rgba(0, 0, 0, 0.42);
+  transform-style: preserve-3d;
+}
+
+.globe-box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  pointer-events: none;
+  background-image: radial-gradient(circle at 52% 42%, rgba(255, 255, 255, 0.12), transparent 37%);
+  mix-blend-mode: screen;
+}
+
+.info-panel {
+  transform-style: preserve-3d;
+  transition: transform 0.22s ease, box-shadow 0.22s ease;
+}
+
+.info-panel:hover {
+  transform: translateZ(4px) rotateX(calc(var(--tilt-x, 0deg) / 7)) rotateY(calc(var(--tilt-y, 0deg) / 7));
+  box-shadow: 0 22px 40px rgba(34, 59, 91, 0.45), 0 0 22px rgba(80, 213, 255, 0.32);
 }
 
 .info-panel p {
@@ -358,6 +452,45 @@ select:focus {
   background: rgba(21, 39, 62, 0.72);
   border-radius: 10px;
   padding: 0.52rem 0.62rem;
+}
+
+.analysis-actions {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.analysis-note {
+  margin-top: 0.52rem;
+  color: #cde0f5;
+  font-size: 0.9rem;
+}
+
+.sync-btn.secondary {
+  border: 1px solid #4f6e90;
+  background: linear-gradient(140deg, #2a4462, #20364f);
+  color: #eaf4ff;
+}
+
+.orbit-grid {
+  margin-top: 0.8rem;
+  display: grid;
+  gap: 0.58rem;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.orbit-grid > div {
+  border: 1px solid #2d4b70;
+  border-radius: 10px;
+  padding: 0.58rem;
+  display: grid;
+  gap: 0.16rem;
+  background: linear-gradient(145deg, rgba(19, 35, 55, 0.8), rgba(13, 25, 40, 0.8));
+}
+
+.orbit-grid small {
+  color: var(--text-300);
 }
 
 .chart-wrap,
@@ -502,5 +635,9 @@ select:focus {
 
   .event-list {
     max-height: 30vh;
+  }
+
+  .analysis-actions {
+    grid-template-columns: 1fr;
   }
 }

@@ -4,65 +4,54 @@ import Globe from "react-globe.gl";
 import Plot from "react-plotly.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
-const API_TIMEOUT_MS = 12000;
+const API_TIMEOUT_MS = 60000;
 const apiClient = axios.create({ baseURL: API_BASE, timeout: API_TIMEOUT_MS });
 const INITIAL_FILTERS = { q: "", dateFrom: "", dateTo: "", station: "" };
 const FALLBACK_SOURCES = [
   {
     id: "global-meteor-network",
+    source_key: "gmn",
     name: "Global Meteor Network",
     category: "Observation",
     role: "Primary meteor observation dataset",
-    integration_status: "planned",
+    integration_status: "live",
+    event_catalogue: true,
   },
   {
     id: "nasa-fireball-api",
+    source_key: "nasa",
     name: "NASA Fireball API",
     category: "Event Catalogue",
     role: "Fireball event catalogue",
     integration_status: "live",
+    event_catalogue: true,
   },
   {
     id: "american-meteor-society",
+    source_key: "ams",
     name: "American Meteor Society",
     category: "Reports",
     role: "Real-time meteor reports",
-    integration_status: "planned",
+    integration_status: "live",
+    event_catalogue: true,
   },
   {
     id: "iau-meteor-data-centre",
+    source_key: "iau",
     name: "IAU Meteor Data Centre",
     category: "Classification",
     role: "Meteor shower classification",
-    integration_status: "planned",
+    integration_status: "live",
+    event_catalogue: false,
   },
   {
-    id: "jpl-horizons-api",
-    name: "JPL Horizons API",
-    category: "Orbital Mechanics",
-    role: "Planetary positions and orbit calculations",
-    integration_status: "planned",
-  },
-  {
-    id: "sonotaco-meteor-orbit-db",
-    name: "SonotaCo Meteor Orbit Database",
-    category: "Reference Orbit Data",
-    role: "Reference meteor orbit dataset",
-    integration_status: "planned",
-  },
-  {
-    id: "edmond-database",
-    name: "EDMOND Database",
-    category: "Multi-station Observations",
-    role: "European multi-station meteor observations",
-    integration_status: "planned",
-  },
-  {
-    id: "nasa-meteoroid-environment-office",
-    name: "NASA Meteoroid Environment Office Dataset",
-    category: "Environment Modelling",
-    role: "Meteoroid environment modelling",
-    integration_status: "planned",
+    id: "fripon-network",
+    source_key: "fripon",
+    name: "FRIPON Network",
+    category: "Observation",
+    role: "High-precision European fireball observations",
+    integration_status: "live",
+    event_catalogue: true,
   },
 ];
 
@@ -81,9 +70,29 @@ const FALLBACK_STACK = {
 
 const FALLBACK_PROJECT_STATUS = {
   phase: "MVP+",
-  dataset_integrations: { total: 8, live: 1, planned: 7 },
+  dataset_integrations: { total: 5, live: 5, planned: 0 },
   storage: { database_enabled: false, real_events_in_database: 0 },
   cache: { cache_enabled: true, backend: "in_memory", ttl_seconds: 120 },
+};
+
+const FALLBACK_ARCHITECTURE = {
+  frontend_modules: [
+    "Meteor Event Catalogue",
+    "3D Trajectory Visualizer",
+    "Velocity & Residual Graphs",
+    "Heliocentric Orbit Renderer",
+    "Comparison Tool",
+    "Notification Subscription",
+  ],
+  backend_modules: [
+    "/sync-source/{source}",
+    "/sync-required-datasets",
+    "/process_meteor/{event_id}",
+    "/get_trajectory/{event_id}",
+    "/fetch_orbit/{event_id}",
+    "/compare_events",
+    "/notifications/subscribe",
+  ],
 };
 
 const normalizeEvents = (rawEvents) => {
@@ -113,7 +122,7 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [compareId, setCompareId] = useState(null);
   const [filters, setFilters] = useState(INITIAL_FILTERS);
-  const [sourceMode] = useState("real");
+  const [sourceMode, setSourceMode] = useState("nasa");
   const [datasetRange, setDatasetRange] = useState(null);
   const [rangeWarning, setRangeWarning] = useState("");
   const [compareSummary, setCompareSummary] = useState(null);
@@ -124,21 +133,52 @@ function App() {
   const [sources, setSources] = useState(FALLBACK_SOURCES);
   const [stackProfile, setStackProfile] = useState(FALLBACK_STACK);
   const [projectStatus, setProjectStatus] = useState(FALLBACK_PROJECT_STATUS);
+  const [architecture, setArchitecture] = useState(FALLBACK_ARCHITECTURE);
+  const [processResult, setProcessResult] = useState(null);
+  const [processLoading, setProcessLoading] = useState(false);
+  const [orbitResult, setOrbitResult] = useState(null);
+  const [orbitLoading, setOrbitLoading] = useState(false);
+  const [analysisMessage, setAnalysisMessage] = useState("");
+  const [notificationEmail, setNotificationEmail] = useState("");
+  const [notificationMessage, setNotificationMessage] = useState("");
+  const [notificationLoading, setNotificationLoading] = useState(false);
+  const [dispatchLoading, setDispatchLoading] = useState(false);
   const [error, setError] = useState("");
   const [globeSize, setGlobeSize] = useState({ width: 760, height: 420 });
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [pointerTilt, setPointerTilt] = useState({ x: 0, y: 0 });
+
+  const handlePointerMove = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const px = ((event.clientX - rect.left) / Math.max(rect.width, 1) - 0.5) * 16;
+    const py = ((event.clientY - rect.top) / Math.max(rect.height, 1) - 0.5) * 16;
+    setPointerTilt({ x: -py, y: px });
+  };
+
+  const handlePointerLeave = () => {
+    setPointerTilt({ x: 0, y: 0 });
+  };
 
   useEffect(() => {
     const fetchProjectMetadata = async () => {
       try {
-        const [sourceResponse, stackResponse, statusResponse] = await Promise.all([
+        const [sourceResponse, stackResponse, statusResponse, architectureResponse] = await Promise.all([
           apiClient.get("/sources"),
           apiClient.get("/stack"),
           apiClient.get("/project-status"),
+          apiClient.get("/architecture"),
         ]);
 
         const remoteSources = sourceResponse?.data?.sources;
         if (Array.isArray(remoteSources) && remoteSources.length > 0) {
           setSources(remoteSources);
+          const availableEventSources = remoteSources
+            .filter((source) => source?.event_catalogue !== false)
+            .map((source) => source?.source_key)
+            .filter(Boolean);
+          if (availableEventSources.length > 0 && !availableEventSources.includes(sourceMode)) {
+            setSourceMode(availableEventSources[0]);
+          }
         }
 
         const remoteStack = stackResponse?.data;
@@ -150,10 +190,17 @@ function App() {
         if (remoteStatus && typeof remoteStatus === "object") {
           setProjectStatus(remoteStatus);
         }
+
+        const remoteArchitecture = architectureResponse?.data;
+        if (remoteArchitecture && typeof remoteArchitecture === "object") {
+          setArchitecture(remoteArchitecture);
+        }
       } catch (metadataError) {
         setSources(FALLBACK_SOURCES);
         setStackProfile(FALLBACK_STACK);
         setProjectStatus(FALLBACK_PROJECT_STATUS);
+        setArchitecture(FALLBACK_ARCHITECTURE);
+        setSourceMode("nasa");
       }
     };
 
@@ -204,7 +251,7 @@ function App() {
     };
 
     fetchDatasetRange();
-  }, [sourceMode]);
+  }, [sourceMode, refreshTick]);
 
   useEffect(() => {
     const fetchEvents = async () => {
@@ -245,8 +292,7 @@ function App() {
         setCompareId(null);
         const detail = fetchError?.response?.data?.detail;
         setError(
-          detail ||
-            "No real dataset available. Start backend and run Sync Real NASA Data to load live events.",
+          detail || "No dataset available for this source. Run Sync Selected Source (or Sync Required Datasets).",
         );
       } finally {
         setLoading(false);
@@ -254,7 +300,7 @@ function App() {
     };
 
     fetchEvents();
-  }, [filters.q, filters.dateFrom, filters.dateTo, filters.station, sourceMode]);
+  }, [filters.q, filters.dateFrom, filters.dateTo, filters.station, sourceMode, refreshTick]);
 
   useEffect(() => {
     if (!datasetRange?.min_date || !datasetRange?.max_date) {
@@ -294,7 +340,7 @@ function App() {
 
       try {
         setCompareLoading(true);
-        const response = await apiClient.get("/compare", {
+        const response = await apiClient.get("/compare_events", {
           params: {
             left: selectedId,
             right: compareId,
@@ -321,6 +367,12 @@ function App() {
     () => events.find((event) => event.id === compareId) || null,
     [events, compareId],
   );
+
+  useEffect(() => {
+    setProcessResult(null);
+    setOrbitResult(null);
+    setAnalysisMessage("");
+  }, [selectedId, sourceMode]);
 
   const arcData = useMemo(() => {
     if (!selectedEvent) return [];
@@ -370,6 +422,22 @@ function App() {
     return traces;
   }, [selectedEvent, compareEvent]);
 
+  const residualData = useMemo(() => {
+    if (!Array.isArray(processResult?.residual_profile_m) || processResult.residual_profile_m.length === 0) {
+      return [];
+    }
+    return [
+      {
+        x: processResult.residual_profile_m.map((_, index) => index + 1),
+        y: processResult.residual_profile_m,
+        type: "scatter",
+        mode: "lines+markers",
+        name: "Residuals (m)",
+        line: { color: "#ffd078", width: 2 },
+      },
+    ];
+  }, [processResult]);
+
   const dashboardStats = useMemo(() => {
     const total = events.length;
     const allVelocities = events.flatMap((event) => event.velocity_km_s);
@@ -386,6 +454,19 @@ function App() {
     };
   }, [sources]);
 
+  const eventCatalogueSources = useMemo(
+    () =>
+      sources.filter(
+        (source) => source?.event_catalogue !== false && typeof source?.source_key === "string",
+      ),
+    [sources],
+  );
+
+  const activeSource = useMemo(
+    () => eventCatalogueSources.find((source) => source.source_key === sourceMode) || null,
+    [eventCatalogueSources, sourceMode],
+  );
+
   const updateFilter = (key, value) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
   };
@@ -399,27 +480,133 @@ function App() {
     setRangeWarning("");
   };
 
-  const syncRealData = async () => {
+  const syncSelectedSource = async () => {
+    if (!sourceMode) return;
     try {
       setSyncLoading(true);
       setSyncMessage("");
-      const response = await apiClient.post("/sync-real-events", null, {
-        params: { limit: 20000 },
+      const response = await apiClient.post(`/sync-source/${sourceMode}`, null, {
+        params: { limit: 2000 },
       });
-      setSyncMessage(`Synced ${response.data.saved_events} real events from NASA CNEOS.`);
+      const savedEvents = response?.data?.saved_events ?? 0;
+      const sourceLabel = activeSource?.name || sourceMode.toUpperCase();
+      setSyncMessage(`Synced ${savedEvents} events from ${sourceLabel}.`);
+      setRefreshTick((prev) => prev + 1);
     } catch (syncError) {
       const detail = syncError?.response?.data?.detail;
-      setSyncMessage(detail || "Real-data sync failed. Retry when backend/API is reachable.");
+      setSyncMessage(detail || "Source sync failed. Retry when backend/API is reachable.");
     } finally {
       setSyncLoading(false);
     }
   };
 
+  const syncRequiredDatasets = async () => {
+    try {
+      setSyncLoading(true);
+      setSyncMessage("");
+      const response = await apiClient.post("/sync-required-datasets", null, {
+        params: { limit_per_event_source: 1200 },
+      });
+      const results = Array.isArray(response?.data?.results) ? response.data.results : [];
+      const successCount = results.filter((row) => row.status === "ok").length;
+      setSyncMessage(`Sync completed for ${successCount}/${results.length} required datasets.`);
+      setRefreshTick((prev) => prev + 1);
+    } catch (syncError) {
+      const detail = syncError?.response?.data?.detail;
+      setSyncMessage(detail || "Required dataset sync failed.");
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const runMultiStationProcessing = async () => {
+    if (!selectedId) return;
+    try {
+      setProcessLoading(true);
+      setAnalysisMessage("");
+      const response = await apiClient.get(`/process_meteor/${selectedId}`, {
+        params: { source: sourceMode },
+      });
+      setProcessResult(response.data);
+      setAnalysisMessage("Multi-station reconstruction complete.");
+    } catch (processError) {
+      const detail = processError?.response?.data?.detail;
+      setProcessResult(null);
+      setAnalysisMessage(detail || "Trajectory reconstruction failed.");
+    } finally {
+      setProcessLoading(false);
+    }
+  };
+
+  const fetchOrbitModel = async () => {
+    if (!selectedId) return;
+    try {
+      setOrbitLoading(true);
+      const response = await apiClient.get(`/fetch_orbit/${selectedId}`, {
+        params: { source: sourceMode },
+      });
+      setOrbitResult(response.data);
+    } catch (orbitError) {
+      const detail = orbitError?.response?.data?.detail;
+      setOrbitResult(null);
+      setAnalysisMessage(detail || "Heliocentric orbit calculation failed.");
+    } finally {
+      setOrbitLoading(false);
+    }
+  };
+
+  const subscribeNotifications = async () => {
+    if (!notificationEmail) return;
+    try {
+      setNotificationLoading(true);
+      setNotificationMessage("");
+      const response = await apiClient.post("/notifications/subscribe", null, {
+        params: { email: notificationEmail },
+      });
+      setNotificationMessage(
+        `${response.data.email} - ${response.data.status.replace("_", " ")}.`,
+      );
+      setNotificationEmail("");
+    } catch (subscribeError) {
+      const detail = subscribeError?.response?.data?.detail;
+      setNotificationMessage(detail || "Subscription failed.");
+    } finally {
+      setNotificationLoading(false);
+    }
+  };
+
+  const dispatchUpcomingAlerts = async () => {
+    try {
+      setDispatchLoading(true);
+      const response = await apiClient.post("/notifications/dispatch-upcoming", null, {
+        params: { days_ahead: 45 },
+      });
+      const sent = response?.data?.delivery?.sent ?? 0;
+      const mode = response?.data?.delivery?.mode ?? "noop";
+      setNotificationMessage(`Upcoming alerts dispatched in ${mode} mode (sent: ${sent}).`);
+    } catch (dispatchError) {
+      const detail = dispatchError?.response?.data?.detail;
+      setNotificationMessage(detail || "Failed to dispatch upcoming alerts.");
+    } finally {
+      setDispatchLoading(false);
+    }
+  };
+
+  const appShellStyle = {
+    "--tilt-x": `${pointerTilt.x}deg`,
+    "--tilt-y": `${pointerTilt.y}deg`,
+  };
+
   return (
-    <main className="app-shell">
-      <header className="app-header">
+    <main
+      className="app-shell"
+      style={appShellStyle}
+      onMouseMove={handlePointerMove}
+      onMouseLeave={handlePointerLeave}
+    >
+      <header className="app-header rounded-2xl border border-cyan-300/20 bg-slate-900/40 p-4 shadow-2xl shadow-cyan-500/10">
         <h1>Meteor Trajectory Command Deck</h1>
-        <p>Live-only mode: real NASA fireball events with no mock or dummy fallback</p>
+        <p>Live multi-source mode: NASA + GMN + AMS + FRIPON event catalogues with IAU shower matching.</p>
       </header>
 
       {loading && <div className="state-banner loading">Loading meteor events...</div>}
@@ -434,13 +621,27 @@ function App() {
             <label className="field-label" htmlFor="source-mode">
               Data Source
             </label>
-            <select id="source-mode" value={sourceMode} disabled>
-              <option value="real">Real NASA Data (Live Only)</option>
+            <select
+              id="source-mode"
+              value={sourceMode}
+              onChange={(e) => setSourceMode(e.target.value)}
+              disabled={eventCatalogueSources.length === 0}
+            >
+              {eventCatalogueSources.map((source) => (
+                <option key={source.source_key} value={source.source_key}>
+                  {source.name}
+                </option>
+              ))}
             </select>
 
-            <button className="sync-btn" onClick={syncRealData} disabled={syncLoading}>
-              {syncLoading ? "Syncing..." : "Sync Real NASA Data"}
-            </button>
+            <div className="analysis-actions">
+              <button className="sync-btn" onClick={syncSelectedSource} disabled={syncLoading}>
+                {syncLoading ? "Syncing..." : "Sync Selected Source"}
+              </button>
+              <button className="sync-btn secondary" onClick={syncRequiredDatasets} disabled={syncLoading}>
+                {syncLoading ? "Syncing..." : "Sync Required Datasets"}
+              </button>
+            </div>
             {syncMessage && <div className="sync-note">{syncMessage}</div>}
 
             {datasetRange?.min_date && datasetRange?.max_date && (
@@ -459,7 +660,11 @@ function App() {
               <br />
               Storage:{" "}
               {projectStatus.storage?.database_enabled
-                ? `${projectStatus.storage?.real_events_in_database ?? 0} DB events`
+                ? `${
+                    projectStatus.storage?.event_counts_by_source?.[sourceMode] ??
+                    projectStatus.storage?.real_events_in_database ??
+                    0
+                  } events (${activeSource?.name || sourceMode})`
                 : "JSON snapshot only"}
               <br />
               Cache: {projectStatus.cache?.backend || "in_memory"} (
@@ -595,6 +800,16 @@ function App() {
                   ))}
                 </select>
 
+                <div className="analysis-actions">
+                  <button className="sync-btn" onClick={runMultiStationProcessing} disabled={processLoading}>
+                    {processLoading ? "Processing..." : "Run /process_meteor"}
+                  </button>
+                  <button className="sync-btn secondary" onClick={fetchOrbitModel} disabled={orbitLoading}>
+                    {orbitLoading ? "Fetching..." : "Run /fetch_orbit"}
+                  </button>
+                </div>
+                {analysisMessage && <p className="analysis-note">{analysisMessage}</p>}
+
                 {compareLoading && <p>Updating comparison...</p>}
                 {!compareLoading && compareSummary && (
                   <div className="compare-summary">
@@ -605,6 +820,37 @@ function App() {
                     <p>
                       <b>{compareSummary.right.name} avg:</b>{" "}
                       {compareSummary.right.avg_velocity_km_s} km/s
+                    </p>
+                    <p>
+                      <b>Delta avg:</b> {compareSummary.delta_avg_velocity_km_s ?? "n/a"} km/s
+                    </p>
+                  </div>
+                )}
+                {processResult?.fit_metrics && (
+                  <div className="compare-summary">
+                    <p>
+                      <b>Reconstruction RMSE:</b> {processResult.fit_metrics.rmse_m} m
+                    </p>
+                    <p>
+                      <b>P95 Error:</b> {processResult.fit_metrics.p95_error_m} m
+                    </p>
+                    <p>
+                      <b>Meteor Shower:</b>{" "}
+                      {processResult.meteor_shower_association?.name || "No clear association"}
+                    </p>
+                  </div>
+                )}
+                {orbitResult?.orbital_elements && (
+                  <div className="compare-summary">
+                    <p>
+                      <b>Orbit e:</b> {orbitResult.orbital_elements.eccentricity}
+                    </p>
+                    <p>
+                      <b>Inclination:</b> {orbitResult.orbital_elements.inclination_deg} deg
+                    </p>
+                    <p>
+                      <b>Semi-major axis:</b>{" "}
+                      {orbitResult.orbital_elements.semi_major_axis_km ?? "hyperbolic"} km
                     </p>
                   </div>
                 )}
@@ -631,6 +877,93 @@ function App() {
               style={{ width: "100%", height: "320px" }}
               useResizeHandler
             />
+          </section>
+
+          <section className="card chart-wrap">
+            <h2>Residual & Orbit Diagnostics</h2>
+            {residualData.length > 0 ? (
+              <Plot
+                data={residualData}
+                layout={{
+                  paper_bgcolor: "rgba(0,0,0,0)",
+                  plot_bgcolor: "rgba(0,0,0,0)",
+                  font: { color: "#e6f1ff" },
+                  xaxis: { title: "Observation Index", gridcolor: "#223047" },
+                  yaxis: { title: "Residual Error (m)", gridcolor: "#223047" },
+                  margin: { t: 24, b: 50, l: 60, r: 24 },
+                }}
+                config={{ displayModeBar: false, responsive: true }}
+                style={{ width: "100%", height: "280px" }}
+                useResizeHandler
+              />
+            ) : (
+              <p className="analysis-note">Run /process_meteor to view residual graphs.</p>
+            )}
+            {orbitResult?.orbital_elements && (
+              <div className="orbit-grid">
+                <div>
+                  <small>Eccentricity</small>
+                  <strong>{orbitResult.orbital_elements.eccentricity}</strong>
+                </div>
+                <div>
+                  <small>Inclination</small>
+                  <strong>{orbitResult.orbital_elements.inclination_deg} deg</strong>
+                </div>
+                <div>
+                  <small>Perihelion</small>
+                  <strong>{orbitResult.orbital_elements.perihelion_km ?? "n/a"} km</strong>
+                </div>
+                <div>
+                  <small>Orbit Source</small>
+                  <strong>{orbitResult.state_source}</strong>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="card panel">
+            <h2>Email Notifications</h2>
+            <p className="analysis-note">
+              Subscribe users and trigger meteor shower/event alerts from the dashboard.
+            </p>
+            <input
+              className="search-box"
+              type="email"
+              placeholder="astro-user@example.com"
+              value={notificationEmail}
+              onChange={(e) => setNotificationEmail(e.target.value)}
+            />
+            <div className="analysis-actions">
+              <button className="sync-btn" onClick={subscribeNotifications} disabled={notificationLoading}>
+                {notificationLoading ? "Subscribing..." : "Subscribe"}
+              </button>
+              <button className="sync-btn secondary" onClick={dispatchUpcomingAlerts} disabled={dispatchLoading}>
+                {dispatchLoading ? "Dispatching..." : "Dispatch Shower Alerts"}
+              </button>
+            </div>
+            {notificationMessage && <div className="sync-note">{notificationMessage}</div>}
+          </section>
+
+          <section className="card stack-wrap">
+            <h2>System Architecture</h2>
+            <div className="stack-grid">
+              <div>
+                <h3>Frontend Modules</h3>
+                <ul>
+                  {(architecture.frontend_modules || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <h3>Backend APIs</h3>
+                <ul>
+                  {(architecture.backend_modules || []).map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
           </section>
 
           <section className="card source-wrap">
