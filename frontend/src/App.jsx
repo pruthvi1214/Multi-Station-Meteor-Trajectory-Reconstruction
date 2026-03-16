@@ -1002,57 +1002,6 @@ function App() {
             </div>
           </section>
 
-          <section className="card stack-wrap">
-            <h2>Technology Stack</h2>
-            <div className="stack-grid">
-              <div>
-                <h3>Frontend</h3>
-                <ul>
-                  {(stackProfile.frontend || []).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3>Backend</h3>
-                <ul>
-                  {(stackProfile.backend || []).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3>Astronomy Libraries</h3>
-                <ul>
-                  {(stackProfile.astronomy_scientific || []).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3>Data Layer</h3>
-                <ul>
-                  {(stackProfile.database_storage || []).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-            <div className="deploy-note">
-              <p>
-                <b>Frontend Hosting:</b> {stackProfile.deployment?.frontend_hosting || "Vercel"}
-              </p>
-              <p>
-                <b>Backend Hosting:</b> {stackProfile.deployment?.backend_hosting || "Render / Railway"}
-              </p>
-              <p>
-                <b>Database Hosting:</b> {stackProfile.deployment?.database_hosting || "Supabase / Neon"}
-              </p>
-              <p>
-                <b>Version Control:</b> {stackProfile.deployment?.version_control || "GitHub"}
-              </p>
-            </div>
-          </section>
         </section>
       )}
     </main>
